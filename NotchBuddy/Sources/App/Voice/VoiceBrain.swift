@@ -446,7 +446,7 @@ struct ServiceTool: Tool, @unchecked Sendable {
 
     @Generable
     struct Arguments {
-        @Guide(description: "One of: stripe, github, vercel, resend, n8n, notion, calcom, agents, claudePlan, codexPlan, music, pills, weatherToday, weatherTomorrow")
+        @Guide(description: "One of: stripe, github, vercel, resend, n8n, notion, calcom, agents, claudePlan, codexPlan, kiroPlan, music, pills, weatherToday, weatherTomorrow")
         var topic: String
     }
 

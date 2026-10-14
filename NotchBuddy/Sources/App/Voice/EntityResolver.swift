@@ -34,6 +34,7 @@ enum EntityResolver {
         "amp":                  "agent_amp",
         "opencode":             "agent_opencode",
         "antigravity":          "agent_antigravity",
+        "kiro":                 "agent_kiro",
         "codex":                "agent_codex",
         "claude desktop":       "agent_claude-desktop",
         // AI

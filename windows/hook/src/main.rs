@@ -230,16 +230,25 @@ fn agent_tag(arg: &str, env: &dyn Fn(&str) -> Option<String>) -> Option<String> 
         .then(|| "claude-desktop".to_string())
 }
 
-/// `cursor` when the session runs in Cursor's integrated terminal. Cursor sets
-/// TERM_PROGRAM=vscode like VS Code does, so it is told apart by its own trace
-/// variable, or by its executable behind VS Code's git helper.
+/// `cursor`/`kiro` when the session runs in that editor's integrated terminal.
+/// Both are VS Code forks that keep TERM_PROGRAM=vscode (Cursor) or set their
+/// own (Kiro), so each is told apart by its own trace variable, or by its
+/// executable behind VS Code's git helper.
 fn term_editor(env: &dyn Fn(&str) -> Option<String>) -> Option<&'static str> {
     if env("CURSOR_TRACE_ID").is_some_and(|v| !v.is_empty()) {
         return Some("cursor");
     }
+    if env("KIRO_SESSION_ID").is_some_and(|v| !v.is_empty())
+        || env("TERM_PROGRAM").is_some_and(|v| v.eq_ignore_ascii_case("kiro"))
+    {
+        return Some("kiro");
+    }
     let helper = env("VSCODE_GIT_ASKPASS_NODE").unwrap_or_default();
     let exe = helper.rsplit(['/', '\\']).next().unwrap_or_default().to_ascii_lowercase();
-    exe.starts_with("cursor").then_some("cursor")
+    if exe.starts_with("cursor") {
+        return Some("cursor");
+    }
+    exe.starts_with("kiro").then_some("kiro")
 }
 
 /// Caps the strings of a payload: every field to MAX_FIELD_LEN, except the edit

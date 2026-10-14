@@ -8,6 +8,7 @@ enum MochiChoice: String, AppEnum {
     case automatic
     case vscode = "integration_claude"
     case cursor = "agent_cursor"
+    case kiro = "agent_kiro"
     case codex = "agent_codex"
     case antigravity = "agent_antigravity"
     case gemini = "agent_gemini"
@@ -25,6 +26,7 @@ enum MochiChoice: String, AppEnum {
         .automatic: "Automatic",
         .vscode: "VS Code",
         .cursor: "Cursor",
+        .kiro: "Kiro",
         .codex: "Codex",
         .antigravity: "Antigravity",
         .gemini: "Gemini CLI",

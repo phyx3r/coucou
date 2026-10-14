@@ -491,8 +491,16 @@ final class AppState: ObservableObject {
         didSet { UserDefaults.standard.set(showCodexPlanInNotch, forKey: "showCodexPlanInNotch") }
     }
     @Published var codexPlanUsage: CodexPlanUsage? = nil
+
+    // Kiro plan gauge (from `kiro-cli chat --no-interactive` + /usage) — fetched when the pill shows
+    @Published var showKiroPlanInNotch: Bool = false {
+        didSet { UserDefaults.standard.set(showKiroPlanInNotch, forKey: "showKiroPlanInNotch") }
+    }
+    @Published var kiroPlanUsage: KiroPlanUsage? = nil
+
     // Which card showingPlanDetail opens
     @Published var planDetailIsCodex: Bool = false
+    @Published var planDetailIsKiro: Bool = false
 
     /// Rate-limited on the attempt, not only on success: without Codex installed or
     /// signed in, every appearance of the pill used to spawn `codex app-server` again.
@@ -507,6 +515,21 @@ final class AppState: ObservableObject {
         Task {
             if let u = await CodexPlanGauge.fetch() { codexPlanUsage = u }
             Self.codexFetchInFlight = false
+        }
+    }
+
+    /// Same rate-limiting as Codex: querying Kiro spawns `kiro-cli`, so throttle the attempt itself.
+    private static var lastKiroAttempt: Date = .distantPast
+    private static var kiroFetchInFlight = false
+
+    func refreshKiroPlanUsage() {
+        if let u = kiroPlanUsage, Date().timeIntervalSince(u.updatedAt) < 60 { return }
+        guard !Self.kiroFetchInFlight, Date().timeIntervalSince(Self.lastKiroAttempt) > 60 else { return }
+        Self.kiroFetchInFlight = true
+        Self.lastKiroAttempt = Date()
+        Task {
+            if let u = await KiroPlanGauge.fetch() { kiroPlanUsage = u }
+            Self.kiroFetchInFlight = false
         }
     }
 
@@ -562,6 +585,7 @@ final class AppState: ObservableObject {
         #if !APPSTORE
         if let v = ud.object(forKey: "showPlanInNotch") as? Bool { showPlanInNotch = v }
         if let v = ud.object(forKey: "showCodexPlanInNotch") as? Bool { showCodexPlanInNotch = v }
+        if let v = ud.object(forKey: "showKiroPlanInNotch") as? Bool { showKiroPlanInNotch = v }
         planRelayInstalled = HookServer.statusLineInstalled()
         #endif
 

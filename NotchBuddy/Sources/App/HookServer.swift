@@ -58,6 +58,26 @@ final class HookServer: @unchecked Sendable {
     private var focusBeforeApproval: String? = nil    // saved focus to restore after approval
     private var sessions = PillSessionRegistry()      // live sessions behind each pill
 
+    /// Kiro tool calls seen in PreToolUse whose PostToolUse hasn't arrived yet.
+    /// Kiro's hooks never say whether Kiro will ask for approval, but a tool it
+    /// gates doesn't run (so no PostToolUse) until you click in Kiro. A call still
+    /// open after `kiroStallDelay` is flagged as "waiting for your approval".
+    private struct KiroPendingTool {
+        let session: String
+        let tool: String
+        let token: UUID
+        var signalled: Bool
+    }
+    private var kiroPendingTools: [String: KiroPendingTool] = [:]
+    /// How long a tool may stay open before it's taken as "waiting for your approval".
+    /// Instant tools (read/write/edit) flag fast; a shell command can legitimately run
+    /// a while, so it waits longer to avoid flagging a merely slow command.
+    private static let kiroStallDelay: TimeInterval = 3
+    private static let kiroStallDelayShell: TimeInterval = 10
+    private static func kiroStallDelay(forTool tool: String) -> TimeInterval {
+        tool == "execute_bash" || tool == "execute_pwsh" ? kiroStallDelayShell : kiroStallDelay
+    }
+
     private init() {}
 
     // MARK: - Approval queue helpers
@@ -67,6 +87,7 @@ final class HookServer: @unchecked Sendable {
     private func handledNote(pill: String) -> String {
         switch pill {
         case "agent_cursor":  return "Handled in Cursor."
+        case "agent_kiro":    return "Handled in Kiro."
         case "agent_codex":   return "Handled in Codex."
         case "agent_copilot": return "Handled in Copilot CLI."
         case "agent_muse":    return "Handled in Muse Code."
@@ -80,6 +101,7 @@ final class HookServer: @unchecked Sendable {
     private func waitingNote(pill: String) -> String {
         switch pill {
         case "agent_cursor":  return "Still waiting in Cursor."
+        case "agent_kiro":    return "Still waiting in Kiro."
         case "agent_codex":   return "Still waiting in Codex."
         case "agent_copilot": return "Still waiting in Copilot CLI."
         case "agent_muse":    return "Still waiting in Muse Code."
@@ -429,7 +451,13 @@ final class HookServer: @unchecked Sendable {
         // Cursor identified solely by its stable Electron bundle ID.
         // ToDesktop builds other apps too — do not match on "todesktop" alone.
         let isCursorEditor = bundleId.lowercased() == "com.todesktop.230313mzl4w4u92"
-        let isVSCodeEditor = !isCursorEditor && (
+        // Kiro: a VS Code-based editor like Cursor. It sets TERM_PROGRAM=kiro (not
+        // vscode), so it is matched on that or on its bundle id, before the VS Code
+        // fallback — otherwise it would be mistaken for a plain terminal and dropped.
+        let isKiroEditor = !isCursorEditor && (
+            termProgram.lowercased() == "kiro" ||
+            bundleId.lowercased() == "dev.kiro.desktop")
+        let isVSCodeEditor = !isCursorEditor && !isKiroEditor && (
             termProgram.lowercased().contains("vscode") ||
             bundleId.lowercased().contains("vscode"))
 
@@ -437,6 +465,7 @@ final class HookServer: @unchecked Sendable {
         // • "codex" → agent_codex (GitHub build only: workspace pill, approvals in the notch)
         // • other valid coucou_agent → external pill (fire-and-forget, no approval card)
         // • Cursor bundle ID → agent_cursor
+        // • Kiro → agent_kiro
         // • VS Code → integration_claude
         // • a known terminal (Warp, Terminal, iTerm…) → integration_claude, host recorded on the task
         #if !APPSTORE
@@ -455,6 +484,9 @@ final class HookServer: @unchecked Sendable {
             isExternalAgent = true
         } else if isCursorEditor {
             agentId = "agent_cursor"
+            isExternalAgent = false
+        } else if isKiroEditor {
+            agentId = "agent_kiro"
             isExternalAgent = false
         } else if isVSCodeEditor {
             agentId = "integration_claude"
@@ -506,6 +538,11 @@ final class HookServer: @unchecked Sendable {
         // A sibling session's event must not take the pill out of its approval state.
         defer {
             if approvals.hasEntries(forPill: agentId) { state.updateTask(id: agentId, state: .approval) }
+        }
+
+        // Kiro's native hooks: notice when Kiro stops on its own approval prompt.
+        if validAgent == "kiro" {
+            watchKiroStall(event: name, payload: payload, session: sessionId, pill: agentId)
         }
 
         switch name {
@@ -703,6 +740,86 @@ final class HookServer: @unchecked Sendable {
         state.syncMode()
     }
 
+    // MARK: - Kiro approval watch
+
+    /// Tracks Kiro tool calls between PreToolUse and PostToolUse. Runs before the
+    /// event's own handling, which then sets the pill state (working, finished…).
+    @MainActor
+    private func watchKiroStall(event: String, payload: [String: Any], session: String, pill: String) {
+        let tool = payload["tool_name"] as? String ?? ""
+        let inputKey = Self.approvalInputKey(payload["tool_input"] as? [String: Any] ?? [:])
+        let key = "\(session)|\(tool)|\(inputKey)"
+        switch event {
+        case "PreToolUse":
+            // A new tool means Kiro moved on (you answered in Kiro), so any waiting
+            // card on this pill is stale: drop every flagged entry and take it down,
+            // whatever session it came from. The new call then starts its own watch.
+            if kiroPendingTools.values.contains(where: { $0.signalled }) {
+                kiroPendingTools = kiroPendingTools.filter { !$0.value.signalled }
+                clearKiroStallCard(pill: pill)
+            }
+            let token = UUID()
+            kiroPendingTools[key] = KiroPendingTool(session: session, tool: tool, token: token, signalled: false)
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.kiroStallDelay(forTool: tool)) {
+                self.signalKiroStall(key: key, token: token, pill: pill)
+            }
+        case "PostToolUse", "PostToolUseFailure":
+            // Same call when the input matches, else the oldest open call of that tool.
+            let match = kiroPendingTools[key] != nil ? key
+                : kiroPendingTools.first(where: { $0.value.session == session && $0.value.tool == tool })?.key
+            if let match, let entry = kiroPendingTools.removeValue(forKey: match), entry.signalled,
+               !kiroPendingTools.values.contains(where: { $0.session == session && $0.signalled }) {
+                clearKiroStallCard(pill: pill)
+            }
+        case "Stop", "StopFailure", "UserPromptSubmit", "SessionEnd":
+            clearKiroPending(session: session, pill: pill)
+        default:
+            break
+        }
+    }
+
+    /// Takes down the "waiting for your approval" card once Kiro moves on: drops the
+    /// badge, clears the leftover final line, and if the card is still showing it,
+    /// collapses it so the normal flow (the tool's own PostToolUse) takes over.
+    @MainActor
+    private func clearKiroStallCard(pill: String) {
+        let state = AppState.shared
+        clearPillBadge(id: pill)
+        if let idx = state.tasks.firstIndex(where: { $0.id == pill }), state.tasks[idx].finalLine != nil {
+            state.tasks[idx].finalLine = nil
+        }
+        if state.view == .finished && state.focusId == pill {
+            NotificationCenter.default.post(name: .islandCollapse, object: nil)
+        }
+    }
+
+    /// Still no PostToolUse: Kiro is most likely waiting on its own Allow / Deny.
+    /// The decision stays in Kiro (its hooks can't answer it), so this shows the big
+    /// card with "Open Kiro" / "OK" (the FinishedView, reused via the .finished state)
+    /// rather than a fake Allow / Deny — Coucou can only point you back to Kiro.
+    @MainActor
+    private func signalKiroStall(key: String, token: UUID, pill: String) {
+        guard var entry = kiroPendingTools[key], entry.token == token, !entry.signalled else { return }
+        entry.signalled = true
+        kiroPendingTools[key] = entry
+        let state = AppState.shared
+        guard let idx = state.tasks.firstIndex(where: { $0.id == pill }) else { return }
+        nbLog("Kiro waiting on \(entry.tool) for \(Int(Self.kiroStallDelay(forTool: entry.tool)))s — likely its approval")
+        state.tasks[idx].finalLine = String(localized: "Waiting for your approval in Kiro")
+        state.updateTask(id: pill, state: .finished)
+        SoundEngine.shared.play("approval")
+        setPillBadge(id: pill, badge: .approval)
+        withAnimation(.spring(response: 0.5, dampingFraction: 0.72)) { state.focusId = pill }
+        NotificationCenter.default.post(name: .hookExpand, object: IslandView.finished)
+    }
+
+    @MainActor
+    private func clearKiroPending(session: String, pill: String) {
+        let flagged = kiroPendingTools.values.contains(where: { $0.session == session && $0.signalled })
+        kiroPendingTools = kiroPendingTools.filter { $0.value.session != session }
+        if flagged { clearKiroStallCard(pill: pill) }
+    }
+
     // MARK: - Helpers
 
     @MainActor
@@ -759,7 +876,10 @@ final class HookServer: @unchecked Sendable {
         let termProgram = payload["term_program"] as? String ?? ""
         let bundleId    = payload["bundle_id"]    as? String ?? ""
         let isCursorEditor = bundleId.lowercased() == "com.todesktop.230313mzl4w4u92"
-        let isVSCodeEditor = !isCursorEditor && (
+        let isKiroEditor = !isCursorEditor && (
+            termProgram.lowercased() == "kiro" ||
+            bundleId.lowercased() == "dev.kiro.desktop")
+        let isVSCodeEditor = !isCursorEditor && !isKiroEditor && (
             termProgram.lowercased().contains("vscode") ||
             bundleId.lowercased().contains("vscode"))
 
@@ -802,14 +922,16 @@ final class HookServer: @unchecked Sendable {
             pillId = "agent_hermes"
         } else if isCursorEditor {
             pillId = "agent_cursor"
+        } else if isKiroEditor {
+            pillId = "agent_kiro"
         } else {
             pillId = "integration_claude"
         }
         // Terminal sessions: only when turned on in Settings, else the terminal asks itself.
-        let terminalHost = isCursorEditor || isVSCodeEditor ? nil
+        let terminalHost = isCursorEditor || isKiroEditor || isVSCodeEditor ? nil
             : ClaudeHost.terminal(termProgram: termProgram, bundleId: bundleId)
         let isTerminal = terminalHost != nil && ClaudeHost.terminalCardsEnabled
-        guard isCodexRequest || isCopilotRequest || isMuseRequest || isHermesRequest || isCursorEditor || isVSCodeEditor || isTerminal else {
+        guard isCodexRequest || isCopilotRequest || isMuseRequest || isHermesRequest || isCursorEditor || isKiroEditor || isVSCodeEditor || isTerminal else {
             Task.detached { [weak self] in
                 self?.sendLine(fd: fd, text: #"{"permissionDecision":"ask"}"#)
                 close(fd)
@@ -940,7 +1062,10 @@ final class HookServer: @unchecked Sendable {
         let termProgram = payload["term_program"]  as? String ?? ""
         let bundleId    = payload["bundle_id"]     as? String ?? ""
         let isCursorEditor = bundleId.lowercased() == "com.todesktop.230313mzl4w4u92"
-        let isVSCodeEditor = !isCursorEditor && (
+        let isKiroEditor = !isCursorEditor && (
+            termProgram.lowercased() == "kiro" ||
+            bundleId.lowercased() == "dev.kiro.desktop")
+        let isVSCodeEditor = !isCursorEditor && !isKiroEditor && (
             termProgram.lowercased().contains("vscode") ||
             bundleId.lowercased().contains("vscode"))
         #if !APPSTORE
@@ -953,14 +1078,16 @@ final class HookServer: @unchecked Sendable {
             pillId = "agent_codex"
         } else if isCursorEditor {
             pillId = "agent_cursor"
+        } else if isKiroEditor {
+            pillId = "agent_kiro"
         } else {
             pillId = "integration_claude"
         }
         // Terminal sessions: only when turned on in Settings, else the terminal asks itself.
-        let terminalHost = isCursorEditor || isVSCodeEditor ? nil
+        let terminalHost = isCursorEditor || isKiroEditor || isVSCodeEditor ? nil
             : ClaudeHost.terminal(termProgram: termProgram, bundleId: bundleId)
         let isTerminal = terminalHost != nil && ClaudeHost.terminalCardsEnabled
-        guard isCodexRequest || isCursorEditor || isVSCodeEditor || isTerminal else {
+        guard isCodexRequest || isCursorEditor || isKiroEditor || isVSCodeEditor || isTerminal else {
             Task.detached { [weak self] in
                 self?.sendLine(fd: fd, text: #"{"permissionDecision":"ask"}"#)
                 close(fd)
@@ -1663,7 +1790,7 @@ final class HookServer: @unchecked Sendable {
         #endif
     }
 
-    // MARK: - Gemini CLI and Antigravity hook installers  (#if !APPSTORE only)
+    // MARK: - Gemini CLI, Antigravity and Kiro hook installers  (#if !APPSTORE only)
 
     #if !APPSTORE
     private static var geminiSettingsURL: URL {
@@ -1671,6 +1798,14 @@ final class HookServer: @unchecked Sendable {
     }
     private static var agyHooksURL: URL {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".gemini/config/hooks.json")
+    }
+    /// Kiro's native agent hooks. Coucou owns this one file (`version: v1` + a
+    /// `hooks` array), so install writes it whole and uninstall deletes it — unlike
+    /// Antigravity, which merges a `coucou` key into a file Kiro shares.
+    /// Written globally so Kiro sessions in any workspace are seen; Kiro documents
+    /// the global `~/.kiro/hooks` load for its CLI, the IDE for the workspace folder.
+    private static var kiroHooksURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".kiro/hooks/coucou.json")
     }
 
     // MARK: Installed-state detection
@@ -1703,6 +1838,12 @@ final class HookServer: @unchecked Sendable {
         let json = (try? JSONSerialization.data(withJSONObject: coucou))
             .flatMap { String(data: $0, encoding: .utf8) } ?? ""
         return json.contains("nb-hook")
+    }
+
+    static func kiroHooksInstalled() -> Bool {
+        guard let data = try? Data(contentsOf: kiroHooksURL),
+              let text = String(data: data, encoding: .utf8) else { return false }
+        return text.contains("nb-hook") && text.contains("--agent kiro")
     }
 
     // MARK: Gemini CLI – preview / write
@@ -1863,6 +2004,93 @@ final class HookServer: @unchecked Sendable {
         var root = try Self.strictReadJSONObject(at: Self.agyHooksURL,
                                                  label: "~/.gemini/config/hooks.json")
         root.removeValue(forKey: "coucou")
+        return try JSONSerialization.data(withJSONObject: root,
+                                         options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+    }
+
+    // MARK: Kiro – preview / write
+
+    private var _pendingKiroData: Data?
+    private var _pendingKiroFingerprint: String?
+
+    /// Builds the file to write (install) or nil to signal deletion (uninstall).
+    /// Returns the preview string; writeKiroHooks() commits it.
+    func previewKiroHooks(install: Bool) throws -> String {
+        let url = Self.kiroHooksURL
+        let exists = FileManager.default.fileExists(atPath: url.path)
+        if !install && !exists {
+            throw NSError(domain: "CoucouNoop", code: 0, userInfo: [
+                NSLocalizedDescriptionKey: "No Kiro hooks to remove."
+            ])
+        }
+        let current = exists ? (try? Data(contentsOf: url)) ?? Data() : Data()
+        _pendingKiroFingerprint = sha256Hex(current)
+        if install {
+            let data = try buildKiroHooksData()
+            _pendingKiroData = data
+            return String(data: data, encoding: .utf8) ?? ""
+        } else {
+            // Uninstall: Coucou owns this file, so the file is deleted whole.
+            _pendingKiroData = nil
+            return "(delete \(url.path))"
+        }
+    }
+
+    func writeKiroHooks(install: Bool) throws {
+        let url = Self.kiroHooksURL
+        guard let fp = _pendingKiroFingerprint else { return }
+        let current = (try? Data(contentsOf: url)) ?? Data()
+        guard sha256Hex(current) == fp else {
+            throw NSError(domain: "Coucou", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "~/.kiro/hooks/coucou.json changed since preview. Refresh and try again."
+            ])
+        }
+        if install {
+            guard let data = _pendingKiroData else { return }
+            try writeJSONFile(data, to: url, suffix: "coucou.json")
+        } else {
+            // Back up before removing, like a write would.
+            if FileManager.default.fileExists(atPath: url.path) {
+                let fmt = DateFormatter()
+                fmt.locale = Locale(identifier: "en_US_POSIX")
+                fmt.dateFormat = "yyyyMMdd-HHmmss"
+                let backupURL = url.deletingLastPathComponent()
+                    .appendingPathComponent("coucou.json.bak-\(fmt.string(from: Date()))")
+                try? FileManager.default.copyItem(at: url, to: backupURL)
+                try FileManager.default.removeItem(at: url)
+            }
+        }
+        _pendingKiroData = nil
+        _pendingKiroFingerprint = nil
+    }
+
+    /// Coucou's Kiro hook file: one command hook per lifecycle event, each calling
+    /// the relay with `--agent kiro`. Kiro emits canonical names (SessionStart,
+    /// PreToolUse, PostToolUse, Stop) and PromptSubmit; the relay maps PromptSubmit
+    /// to UserPromptSubmit. Tool hooks match every tool (`*`); lifecycle hooks have
+    /// no matcher. Kiro passes the event JSON on stdin, which the relay forwards.
+    private func buildKiroHooksData() throws -> Data {
+        let base = hookBase()
+        func hook(_ name: String, _ event: String, matcher: String?) -> [String: Any] {
+            var h: [String: Any] = [
+                "name": name,
+                "trigger": event,
+                "action": ["type": "command",
+                           "command": "\(base) --agent kiro \(event)"],
+                "timeout": 10,
+            ]
+            if let matcher { h["matcher"] = matcher }
+            return h
+        }
+        // event name passed to the relay = canonical Coucou event (relay keeps it as is).
+        let hooks: [[String: Any]] = [
+            hook("Coucou session start", "SessionStart", matcher: nil),
+            hook("Coucou prompt submit", "PromptSubmit", matcher: nil),
+            hook("Coucou pre tool use",  "PreToolUse",  matcher: "*"),
+            hook("Coucou post tool use", "PostToolUse", matcher: "*"),
+            hook("Coucou stop",          "Stop",         matcher: nil),
+        ]
+        let root: [String: Any] = ["version": "v1", "hooks": hooks]
         return try JSONSerialization.data(withJSONObject: root,
                                          options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
     }
@@ -3199,6 +3427,8 @@ def normalize_event(name):
         'agentStop': 'Stop', 'notification': 'Notification',
         'preToolUse': 'PreToolUse', 'postToolUse': 'PostToolUse',
         'permissionRequest': 'PermissionRequest', 'sessionEnd': 'SessionEnd',
+        'agentSpawn': 'SessionStart', 'PromptSubmit': 'UserPromptSubmit',
+        'promptSubmit': 'UserPromptSubmit',
     }
     return mapping.get(name, name)
 
@@ -3506,6 +3736,8 @@ def normalize_event(name):
         'agentStop': 'Stop', 'notification': 'Notification',
         'preToolUse': 'PreToolUse', 'postToolUse': 'PostToolUse',
         'permissionRequest': 'PermissionRequest', 'sessionEnd': 'SessionEnd',
+        'agentSpawn': 'SessionStart', 'PromptSubmit': 'UserPromptSubmit',
+        'promptSubmit': 'UserPromptSubmit',
     }
     return mapping.get(name, name)
 

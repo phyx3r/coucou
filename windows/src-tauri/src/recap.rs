@@ -471,7 +471,8 @@ fn text<'a>(payload: &'a Value, key: &str) -> &'a str {
 /// Same routing as hooks.ts, so a turn counts for the pill it showed on: a
 /// valid `coucou_agent` → `agent_<name>` (every agent the relay normalises,
 /// Claude Desktop included); otherwise Claude Code's own pill — Cursor's when
-/// it runs in Cursor's terminal, VS Code's else. "claude" is reserved.
+/// it runs in Cursor's terminal, Kiro's in Kiro's terminal, VS Code's else.
+/// "claude" is reserved.
 fn agent_id(payload: &Value) -> String {
     let raw = text(payload, "coucou_agent");
     let valid = !raw.is_empty()
@@ -482,6 +483,8 @@ fn agent_id(payload: &Value) -> String {
         format!("agent_{raw}")
     } else if text(payload, "term_editor") == "cursor" {
         "agent_cursor".to_string()
+    } else if text(payload, "term_editor") == "kiro" {
+        "agent_kiro".to_string()
     } else {
         "integration_claude".to_string()
     }

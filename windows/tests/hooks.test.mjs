@@ -370,6 +370,16 @@ test("Claude Code in Cursor's terminal works on the Cursor pill, made for the se
   assert.equal(task("agent_cursor"), undefined);
 });
 
+test("Claude Code in Kiro's terminal works on the Kiro pill, made for the session", () => {
+  hook({ hook_event_name: "SessionStart", cwd: "/p/proj", session_id: "k9", term_editor: "kiro" });
+  hook({ hook_event_name: "PreToolUse", cwd: "/p/proj", term_editor: "kiro", tool_name: "Bash", tool_input: { command: "ls" } });
+  assert.equal(task("agent_kiro").state, "working");
+  assert.equal(task("agent_kiro").sessionId, "k9");
+  assert.equal(task().state, "idle");
+  hook({ hook_event_name: "SessionEnd", term_editor: "kiro" });
+  assert.equal(task("agent_kiro"), undefined);
+});
+
 test("with another main tool, Claude Code's pill comes for the session and goes after", () => {
   State.settings.mainPill = "agent_codex";
   State.loadIntegrationTasks();

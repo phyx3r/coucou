@@ -117,7 +117,9 @@ struct OverviewView: View {
                 if state.showingPlanDetail {
                     CardBackground(wash: nil)
                     Group {
-                        if state.planDetailIsCodex {
+                        if state.planDetailIsKiro {
+                            KiroPlanCardView(usage: state.kiroPlanUsage)
+                        } else if state.planDetailIsCodex {
                             CodexPlanCardView(usage: state.codexPlanUsage)
                         } else {
                             // Claude and Codex both on: the header shows only the Claude pill,
@@ -251,6 +253,13 @@ struct OverviewView: View {
             #if !APPSTORE
             if let url = NSWorkspace.shared.urlForApplication(
                 withBundleIdentifier: "com.todesktop.230313mzl4w4u92") {
+                NSWorkspace.shared.openApplication(at: url, configuration: .init(), completionHandler: nil)
+            }
+            #endif
+        case "agent_kiro":
+            #if !APPSTORE
+            if let url = NSWorkspace.shared.urlForApplication(
+                withBundleIdentifier: "dev.kiro.desktop") {
                 NSWorkspace.shared.openApplication(at: url, configuration: .init(), completionHandler: nil)
             }
             #endif
@@ -654,7 +663,7 @@ struct FinishedView: View {
         ZStack {
             CardBackground(wash: .green)
             VStack(alignment: .leading, spacing: 5) {
-                AgentWho(task: state.focusTask, label: "Claude Code finished")
+                AgentWho(task: state.focusTask, label: finishedLabel)
                 Text({
                     if let fl = state.focusTask?.finalLine { return fl }
                     if let s = state.focusTask?.steps.last(where: { !$0.isDiffStep }) { return s }
@@ -668,6 +677,14 @@ struct FinishedView: View {
                         // Sessions from the Claude desktop app live there, not in a terminal.
                         PrimaryButton("Open Claude") {
                             openClaudeDesktopApp()
+                            NotificationCenter.default.post(name: .islandCollapse, object: nil)
+                        }
+                    } else if let bundleId = editorBundleId {
+                        // Editor-based agents (Cursor, Kiro) open in their own app, not a terminal.
+                        PrimaryButton(openEditorLabel) {
+                            if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) {
+                                NSWorkspace.shared.openApplication(at: url, configuration: .init(), completionHandler: nil)
+                            }
                             NotificationCenter.default.post(name: .islandCollapse, object: nil)
                         }
                     } else {
@@ -693,6 +710,27 @@ struct FinishedView: View {
             .padding(.vertical, 4)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    /// Gray "… finished" header. The Claude Code pill names Claude Code (its
+    /// task.name is the project); editor/agent pills already show their own name
+    /// in AgentWho, so the header is just "finished".
+    private var finishedLabel: String {
+        state.focusTask?.id == "integration_claude" ? "Claude Code finished" : "finished"
+    }
+
+    /// Bundle id of the editor to reopen for an editor-based agent pill, else nil
+    /// (Claude Code / terminal sessions fall back to the terminal button).
+    private var editorBundleId: String? {
+        switch state.focusTask?.id {
+        case "agent_cursor": return "com.todesktop.230313mzl4w4u92"
+        case "agent_kiro":   return "dev.kiro.desktop"
+        default:             return nil
+        }
+    }
+
+    private var openEditorLabel: String {
+        state.focusTask?.id == "agent_kiro" ? "Open Kiro" : "Open Cursor"
     }
 }
 
@@ -1812,10 +1850,19 @@ struct IntegrationCardView: View {
 
     private var isConfigured: Bool {
         switch task.id {
-        // Cursor sessions are Claude Code running in Cursor's integrated terminal,
-        // so the Cursor pill is set up exactly when the Claude Code hooks are.
+        // Cursor sessions are Claude Code running in Cursor's VS Code-based
+        // integrated terminal, so the pill is set up exactly when the Claude
+        // Code hooks are.
         case "integration_claude", "agent_cursor":
             return HookServer.claudeHooksInstalled()
+        // Kiro has its own native hooks (Settings → Kiro → Install hooks), and
+        // also carries Claude Code run in its terminal — either one configures it.
+        case "agent_kiro":
+            #if !APPSTORE
+            return HookServer.kiroHooksInstalled() || HookServer.claudeHooksInstalled()
+            #else
+            return HookServer.claudeHooksInstalled()
+            #endif
         case "agent_codex":
             #if !APPSTORE
             return HookServer.codexHooksInstalled()
@@ -2038,6 +2085,7 @@ struct IntegrationCardView: View {
         // nothing left to load — a session replaces this card, it never resolves here.
         let isHooks = task.id == "integration_claude" || task.id == "agent_gemini"
                    || task.id == "agent_antigravity"  || task.id == "agent_cursor"
+                   || task.id == "agent_kiro"
                    || task.id == "agent_codex"        || task.id == "agent_copilot"
                    || task.id == "agent_muse"         || task.id == "agent_opencode"
                    || task.id == "agent_amp"          || task.id == "agent_hermes"
@@ -2236,6 +2284,19 @@ struct IntegrationCardView: View {
                             .buttonStyle(.plain)
                         }
                         #endif
+                    } else if task.id == "agent_kiro" {
+                        #if !APPSTORE
+                        if let url = NSWorkspace.shared.urlForApplication(
+                            withBundleIdentifier: "dev.kiro.desktop") {
+                            Button("Open Kiro") {
+                                NSWorkspace.shared.openApplication(at: url, configuration: .init(),
+                                                                   completionHandler: nil)
+                            }
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(Color(hex: task.color).opacity(0.85))
+                            .buttonStyle(.plain)
+                        }
+                        #endif
                     } else if task.id == "agent_codex" {
                         #if !APPSTORE
                         if let url = NSWorkspace.shared.urlForApplication(
@@ -2325,9 +2386,10 @@ struct IntegrationCardView: View {
                             .foregroundColor(Color(hex: "#C9956A").opacity(0.85))
                             .buttonStyle(.plain)
                     }
-                    // Settings button: shown when not configured, except cursor/codex and music
+                    // Settings button: shown when not configured, except cursor/kiro/codex and music
                     if !isConfigured
                        && task.id != "agent_cursor"
+                       && task.id != "agent_kiro"
                        && task.id != "agent_codex"
                        && task.id != "integration_music"
                        && task.id != "integration_mail" {

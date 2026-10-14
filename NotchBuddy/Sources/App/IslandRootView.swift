@@ -551,12 +551,15 @@ struct IslandHeader: View {
             // Right: plan pill (GitHub build, home view only) + action icons
             HStack(spacing: 8) {
                 #if !APPSTORE
-                // Claude and Codex both on: only Claude here (two pills and the icons do not
-                // clear the notch); Codex is a row in the Claude plan card.
+                // Only one pill fits beside the icons without crowding the notch, so pick
+                // one by priority: Claude, then Codex, then Kiro. The others appear as rows
+                // in the open card.
                 if state.view == .overview && state.showPlanInNotch && state.planRelayInstalled {
                     ClaudePlanHeaderPill(state: state)
                 } else if state.view == .overview && state.showCodexPlanInNotch {
-                    ClaudePlanHeaderPill(state: state, codex: true)
+                    ClaudePlanHeaderPill(state: state, provider: .codex)
+                } else if state.view == .overview && state.showKiroPlanInNotch {
+                    ClaudePlanHeaderPill(state: state, provider: .kiro)
                 }
                 #endif
                 HStack(spacing: 14) {
@@ -638,34 +641,63 @@ struct TabButton: View {
 // MARK: - Claude Plan header pill (GitHub build only)
 
 #if !APPSTORE
+enum PlanPillProvider { case claude, codex, kiro }
+
 struct ClaudePlanHeaderPill: View {
     @ObservedObject var state: AppState
-    var codex: Bool = false
+    var provider: PlanPillProvider = .claude
     @State private var isHovered = false
 
+    // Backwards-compatible initializers (callers used `codex: Bool`).
+    init(state: AppState, provider: PlanPillProvider = .claude) {
+        self.state = state
+        self.provider = provider
+    }
+    init(state: AppState, codex: Bool) {
+        self.state = state
+        self.provider = codex ? .codex : .claude
+    }
+
     private var effectiveColor: String {
-        if codex { return CodexPlanGauge.color(state.codexPlanUsage) }
-        return ClaudePlanGauge.color(for: (state.demoPlanUsageOverride ?? state.claudePlanUsage).flatMap { ClaudePlanGauge.dominantPct($0) })
+        switch provider {
+        case .codex: return CodexPlanGauge.color(state.codexPlanUsage)
+        case .kiro:  return KiroPlanGauge.color(state.kiroPlanUsage)
+        case .claude:
+            return ClaudePlanGauge.color(for: (state.demoPlanUsageOverride ?? state.claudePlanUsage).flatMap { ClaudePlanGauge.dominantPct($0) })
+        }
     }
 
     private var label: String {
-        if codex { return CodexPlanGauge.pillLabel(state.codexPlanUsage) }
-        guard let usage = state.demoPlanUsageOverride ?? state.claudePlanUsage,
-              let pct = ClaudePlanGauge.dominantPct(usage) else { return "Claude —" }
-        return "Claude \(Int(pct.rounded()))%"
+        switch provider {
+        case .codex: return CodexPlanGauge.pillLabel(state.codexPlanUsage)
+        case .kiro:  return KiroPlanGauge.pillLabel(state.kiroPlanUsage)
+        case .claude:
+            guard let usage = state.demoPlanUsageOverride ?? state.claudePlanUsage,
+                  let pct = ClaudePlanGauge.dominantPct(usage) else { return "Claude —" }
+            return "Claude \(Int(pct.rounded()))%"
+        }
     }
 
-    private var isOpen: Bool { state.showingPlanDetail && state.planDetailIsCodex == codex }
+    private var isOpen: Bool {
+        guard state.showingPlanDetail else { return false }
+        switch provider {
+        case .codex:  return state.planDetailIsCodex
+        case .kiro:   return state.planDetailIsKiro
+        case .claude: return !state.planDetailIsCodex && !state.planDetailIsKiro
+        }
+    }
     private var isActive: Bool { isOpen || isHovered }
 
     var body: some View {
         Button(action: {
             withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
                 let open = isOpen
-                state.planDetailIsCodex = codex
+                state.planDetailIsCodex = (provider == .codex)
+                state.planDetailIsKiro = (provider == .kiro)
                 state.showingPlanDetail = !open
             }
-            if codex { state.refreshCodexPlanUsage() }
+            if provider == .codex { state.refreshCodexPlanUsage() }
+            if provider == .kiro { state.refreshKiroPlanUsage() }
         }) {
             HStack(spacing: 4) {
                 Circle()
@@ -696,7 +728,10 @@ struct ClaudePlanHeaderPill: View {
         .onHover { h in
             withAnimation(.spring(response: 0.2, dampingFraction: 0.7)) { isHovered = h }
         }
-        .onAppear { if codex { state.refreshCodexPlanUsage() } }
+        .onAppear {
+            if provider == .codex { state.refreshCodexPlanUsage() }
+            if provider == .kiro { state.refreshKiroPlanUsage() }
+        }
     }
 }
 #endif

@@ -101,6 +101,9 @@ final class LiveVoiceInfo: VoiceInfoProviding {
         case .codexPlan:
             s.plan = Self.plan(app.codexPlanUsage?.planUsage, fr: fr)
 
+        case .kiroPlan:
+            s.plan = Self.plan(app.kiroPlanUsage?.planUsage, fr: fr)
+
         case .music:
             if app.musicPlaying, let title = MusicController.shared.trackTitle {
                 s.nowPlaying = (title: title, artist: MusicController.shared.artist)

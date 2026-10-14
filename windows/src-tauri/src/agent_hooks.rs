@@ -58,10 +58,11 @@ pub fn status() -> HashMap<String, bool> {
     for agent in crate::agents::list() {
         out.insert(format!("agent_{}", agent.id), agent.installed);
     }
-    // The Cursor pill also carries Claude Code run in Cursor's terminal, which
-    // Claude Code's own hooks report.
+    // The Cursor and Kiro pills also carry Claude Code run in their VS Code-based
+    // terminal, which Claude Code's own hooks report.
     if claude {
         out.insert("agent_cursor".to_string(), true);
+        out.insert("agent_kiro".to_string(), true);
     }
     out
 }

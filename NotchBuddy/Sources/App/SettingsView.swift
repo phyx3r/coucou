@@ -49,6 +49,11 @@ struct SettingsView: View {
     @State private var pendingAgyJSON: String = ""
     @State private var agyPendingInstall: Bool = true
 
+    @State private var kiroHooksInstalled: Bool = HookServer.kiroHooksInstalled()
+    @State private var showKiroDiff: Bool = false
+    @State private var pendingKiroJSON: String = ""
+    @State private var kiroPendingInstall: Bool = true
+
     @State private var codexHooksInstalled: Bool = HookServer.codexHooksInstalled()
     @State private var showCodexDiff: Bool = false
     @State private var pendingCodexJSON: String = ""
@@ -684,6 +689,39 @@ struct SettingsView: View {
             .padding(6)
         }
 
+        GroupBox("Kiro") {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(kiroHooksInstalled
+                     ? String(localized: "Hooks installed")
+                     : "~/.kiro/hooks/coucou.json")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(.secondary)
+                HStack(spacing: 10) {
+                    Button(String(localized: "hooks.install")) { triggerKiroPreview(install: true) }
+                        .buttonStyle(.borderedProminent)
+                    Button(String(localized: "hooks.uninstall")) { triggerKiroPreview(install: false) }
+                        .buttonStyle(.bordered)
+                }
+                if showKiroDiff {
+                    ScrollView {
+                        Text(pendingKiroJSON)
+                            .font(.system(size: 10, design: .monospaced))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(height: 140)
+                    .background(Color(NSColor.textBackgroundColor))
+                    .cornerRadius(6)
+                    HStack {
+                        Button(String(localized: "hooks.confirm-write")) { confirmKiroOp() }
+                            .buttonStyle(.borderedProminent)
+                        Button(String(localized: "Cancel")) { showKiroDiff = false; pendingKiroJSON = "" }
+                            .buttonStyle(.bordered)
+                    }
+                }
+            }
+            .padding(6)
+        }
+
         GroupBox(String(localized: "hooks.codex.title")) {
             VStack(alignment: .leading, spacing: 10) {
                 Text(codexHooksInstalled
@@ -995,6 +1033,15 @@ struct SettingsView: View {
                 Toggle("Show Codex plan in the notch", isOn: Binding(
                     get: { state.showCodexPlanInNotch },
                     set: { state.showCodexPlanInNotch = $0 }
+                ))
+                Divider()
+                Text("Shows your Kiro plan usage (credits used and monthly reset) in the notch header. Coucou asks the Kiro CLI (kiro-cli /usage) when the pill shows; nothing is installed. Kiro CLI must be signed in.")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Toggle("Show Kiro plan in the notch", isOn: Binding(
+                    get: { state.showKiroPlanInNotch },
+                    set: { state.showKiroPlanInNotch = $0 }
                 ))
             }
             .padding(6)
@@ -1796,6 +1843,33 @@ struct SettingsView: View {
         }
     }
 
+    private func triggerKiroPreview(install: Bool) {
+        do {
+            kiroPendingInstall = install
+            pendingKiroJSON = try HookServer.shared.previewKiroHooks(install: install)
+            showKiroDiff = true
+            statusMessage = String(localized: "hooks.review-json")
+        } catch let e as NSError where e.domain == "CoucouNoop" {
+            statusMessage = e.localizedDescription
+        } catch {
+            statusMessage = "❌ \(error.localizedDescription)"
+        }
+    }
+
+    private func confirmKiroOp() {
+        do {
+            try HookServer.shared.writeKiroHooks(install: kiroPendingInstall)
+            showKiroDiff = false
+            pendingKiroJSON = ""
+            kiroHooksInstalled = kiroPendingInstall
+            statusMessage = kiroPendingInstall
+                ? String(localized: "Kiro hooks installed")
+                : String(localized: "Kiro hooks removed")
+        } catch {
+            statusMessage = "❌ \(error.localizedDescription)"
+        }
+    }
+
     private func triggerCodexPreview(install: Bool) {
         do {
             codexPendingInstall = install
@@ -2151,6 +2225,8 @@ struct SettingsView: View {
             #if !APPSTORE
             if def.id == "agent_gemini"        && !HookServer.geminiHooksInstalled()      { return String(localized: "Hooks not installed") }
             if def.id == "agent_antigravity"   && !HookServer.agyHooksInstalled()        { return String(localized: "Hooks not installed") }
+            // Kiro: its own hooks, or Claude Code running in Kiro's terminal (shared hooks).
+            if def.id == "agent_kiro"          && !HookServer.kiroHooksInstalled() && !HookServer.claudeHooksInstalled() { return String(localized: "Hooks not installed") }
             if def.id == "agent_codex"         && !HookServer.codexHooksInstalled()      { return String(localized: "Hooks not installed") }
             if def.id == "agent_copilot"       && !HookServer.copilotHooksInstalled()    { return String(localized: "Hooks not installed") }
             if def.id == "agent_muse"          && !HookServer.museHooksInstalled()       { return String(localized: "Hooks not installed") }

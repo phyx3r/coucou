@@ -105,6 +105,13 @@ Amp (`agent_amp`) and Hermes (`agent_hermes`) in Settings → Active pills. Curs
 (`agent_codex`, GitHub build only) are there too — their pills can be declared and set as
 the main pill; session support is coming in a future version.
 
+Cursor (`agent_cursor`) and Kiro (`agent_kiro`) are VS Code-based editors: Claude Code runs
+in their integrated terminal, so they share Claude Code's hooks and need no `--agent` flag or
+separate install. The relay tells them apart from plain VS Code by the editor itself — on
+macOS by bundle id (`com.todesktop.230313mzl4w4u92` for Cursor, `dev.kiro.desktop` for Kiro)
+or `TERM_PROGRAM` (`kiro`), on Windows/Linux by a trace variable (`CURSOR_TRACE_ID`,
+`KIRO_SESSION_ID`) — and routes the session to that editor's pill.
+
 Claude Desktop (`agent_claude-desktop`, every build) is there as well. Claude Code sessions started from the Claude desktop app's Code tab carry `CLAUDE_CODE_ENTRYPOINT=claude-desktop`; the relay tags them `coucou_agent: claude-desktop` on its own (an explicit `--agent` still wins), so nothing extra is installed. Declare the pill to keep it after the session ends; the ↗ button opens the Claude app.
 
 ## Real-world examples

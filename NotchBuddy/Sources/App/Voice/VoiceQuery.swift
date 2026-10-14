@@ -14,7 +14,7 @@ import Foundation
 enum VoiceTopic: String, Equatable, CaseIterable {
     case stripe, github, vercel, resend, n8n, notion, calcom
     case agents          // Claude Code and the other agent sessions
-    case claudePlan, codexPlan
+    case claudePlan, codexPlan, kiroPlan
     case music, pills
     case weatherToday, weatherTomorrow
 }
@@ -56,6 +56,7 @@ enum VoiceQuery {
         if hasAny(["cal com", "calcom", "rendez vous", "rdv", "agenda", "reunion", "reunions",
                    "meeting", "meetings", "booking", "bookings", "reservation", "reservations"]) { return .calcom }
         if hasAny(["quota", "limite", "limites", "forfait", "usage", "plan"]) {
+            if has("kiro") { return .kiroPlan }
             return has("codex") ? .codexPlan : .claudePlan
         }
         if hasAny(["claude", "codex", "cursor", "gemini", "copilot", "vs code", "vscode", "visual studio",
@@ -699,14 +700,19 @@ enum VoiceAnswer {
                 return a.detail.map { "\(a.name) \(st) : \($0)." } ?? "\(a.name) \(st)."
             }.joined(separator: " ")
 
-        case .claudePlan, .codexPlan:
-            let name = topic == .claudePlan ? "Claude" : "Codex"
+        case .claudePlan, .codexPlan, .kiroPlan:
+            let name = topic == .claudePlan ? "Claude" : (topic == .codexPlan ? "Codex" : "Kiro")
             guard let p = s.plan, p.fiveHourPct != nil || p.sevenDayPct != nil else {
                 return t("Je n'ai pas encore l'usage de ton plan \(name).", "I don't have your \(name) plan usage yet.")
             }
             var parts: [String] = []
             if let h = p.fiveHourPct { parts.append(t("\(h) % sur 5 heures", "\(h)% of the 5-hour window")) }
-            if let w = p.sevenDayPct { parts.append(t("\(w) % sur la semaine", "\(w)% of the week")) }
+            if let w = p.sevenDayPct {
+                // Kiro reports a single monthly window; the others a weekly one.
+                parts.append(topic == .kiroPlan
+                             ? t("\(w) % sur le mois", "\(w)% of the month")
+                             : t("\(w) % sur la semaine", "\(w)% of the week"))
+            }
             var out = t("Plan \(name) : ", "\(name) plan: ") + parts.joined(separator: t(" et ", " and ")) + "."
             if let r = p.resetsIn { out += t(" Remise à zéro dans \(r).", " Resets in \(r).") }
             return out
@@ -751,6 +757,7 @@ enum VoiceAnswer {
         case .calcom:     return "Cal.com"
         case .claudePlan: return "Claude"
         case .codexPlan:  return "Codex"
+        case .kiroPlan:   return "Kiro"
         case .agents:     return "Claude Code"
         case .music:      return "Music"
         case .pills:      return "Coucou"

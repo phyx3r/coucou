@@ -116,7 +116,7 @@ final class InstructionRunner {
         guard Self.isEnabled else { log("ignored: instructions are off"); return }
         guard Date().timeIntervalSince(createdAt) < maxAge else { log("ignored: older than 10 min"); return }
         guard !text.isEmpty, text.count <= 8000 else { log("ignored: empty or too long"); return }
-        guard pillId == "integration_claude" || pillId == "agent_cursor" else { log("ignored: \(pillId) can't take instructions"); return }
+        guard pillId == "integration_claude" || pillId == "agent_cursor" || pillId == "agent_kiro" else { log("ignored: \(pillId) can't take instructions"); return }
         guard let session = TurnRecorder.shared.lastSession(for: pillId) else {
             log("ignored: no Claude Code session seen for \(pillId) yet")
             return
@@ -151,6 +151,8 @@ final class InstructionRunner {
         // The hooks route events by editor: keep them on the same pill.
         if pillId == "agent_cursor" {
             env["__CFBundleIdentifier"] = "com.todesktop.230313mzl4w4u92"
+        } else if pillId == "agent_kiro" {
+            env["TERM_PROGRAM"] = "kiro"
         } else {
             env["TERM_PROGRAM"] = "vscode"
         }
